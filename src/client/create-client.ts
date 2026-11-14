@@ -211,6 +211,31 @@ const normalizeRequestOrigin = (
   });
 };
 
+// convex-helpers' corsRouter only matches an exact origin, `*` or
+// `*.domain`, while Better Auth also supports patterns like
+// `http://localhost:*`. When a wildcard pattern is configured, the request's
+// origin is allowed as itself if Better Auth trusts it.
+const withWildcardMatch = async (
+  trustedOrigins: string[],
+  request: Request,
+  getContext: () => Promise<unknown>
+) => {
+  const origin = request.headers.get("origin");
+  if (
+    !origin ||
+    trustedOrigins.includes(origin) ||
+    !trustedOrigins.some((pattern) => /[*?]/.test(pattern))
+  ) {
+    return trustedOrigins;
+  }
+  const ctx = (await getContext()) as {
+    isTrustedOrigin?: (url: string) => boolean;
+  };
+  return ctx.isTrustedOrigin?.(origin)
+    ? [...trustedOrigins, origin]
+    : trustedOrigins;
+};
+
 // Verbose logs end up in the Convex dashboard and log streams, and get pasted
 // into issues. Keep credentials (session cookies, bearer tokens, JWTs, API
 // keys) out of them.
@@ -595,14 +620,13 @@ export const createClient = <
           const trustedOrigins = rawOrigins.filter(
             (origin): origin is string => typeof origin === "string"
           );
-          return trustedOrigins
-            .map((origin) =>
-              // Strip trailing wildcards, unsupported for allowedOrigins
-              origin.endsWith("*") && origin.length > 1
-                ? origin.slice(0, -1)
-                : origin
+          return (
+            await withWildcardMatch(
+              trustedOrigins,
+              request,
+              () => staticAuth.$context
             )
-            .concat(corsOpts.allowedOrigins ?? []);
+          ).concat(corsOpts.allowedOrigins ?? []);
         },
         allowCredentials: true,
         allowedHeaders: [
@@ -713,14 +737,13 @@ export const createClient = <
           const trustedOrigins = rawOrigins.filter(
             (origin): origin is string => typeof origin === "string"
           );
-          return trustedOrigins
-            .map((origin) =>
-              // Strip trailing wildcards, unsupported for allowedOrigins
-              origin.endsWith("*") && origin.length > 1
-                ? origin.slice(0, -1)
-                : origin
+          return (
+            await withWildcardMatch(
+              trustedOrigins,
+              request,
+              () => getRegistrationAuth().$context
             )
-            .concat(corsOpts.allowedOrigins ?? []);
+          ).concat(corsOpts.allowedOrigins ?? []);
         },
         allowCredentials: true,
         allowedHeaders: [
