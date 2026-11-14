@@ -362,9 +362,13 @@ describe("createClient route registration", () => {
 });
 
 describe("createClient CORS with wildcard trustedOrigins", () => {
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
   const preflight = async (
     register: "registerRoutes" | "registerRoutesLazy",
-    trustedOrigins: string[],
+    trustedOrigins: string[] | ((request?: Request) => string[]),
     origin: string
   ) => {
     const client = createClient(component);
@@ -389,7 +393,9 @@ describe("createClient CORS with wildcard trustedOrigins", () => {
     return response.headers.get("access-control-allow-origin");
   };
 
-  const betterAuthContext = async (trustedOrigins: string[]) => {
+  const betterAuthContext = async (
+    trustedOrigins: string[] | ((request?: Request) => string[])
+  ) => {
     const { betterAuth } = await import("better-auth/minimal");
     return betterAuth({
       baseURL: "https://deployment.convex.site",
@@ -423,6 +429,41 @@ describe("createClient CORS with wildcard trustedOrigins", () => {
       ]) {
         expect(await preflight(register, [pattern], origin)).toBeNull();
       }
+    }
+  );
+
+  it.each(["registerRoutes", "registerRoutesLazy"] as const)(
+    "%s allows wildcards returned by a trustedOrigins function per request",
+    async (register) => {
+      const trustedOrigins = (request?: Request) =>
+        request ? ["http://localhost:*"] : [];
+      expect(
+        await preflight(register, trustedOrigins, "http://localhost:5173")
+      ).toBe("http://localhost:5173");
+      expect(
+        await preflight(register, trustedOrigins, "http://127.0.0.1:5173")
+      ).toBeNull();
+    }
+  );
+
+  it.each(["registerRoutes", "registerRoutesLazy"] as const)(
+    "%s allows origins matching a wildcard in BETTER_AUTH_TRUSTED_ORIGINS",
+    async (register) => {
+      vi.stubEnv("BETTER_AUTH_TRUSTED_ORIGINS", "http://localhost:*");
+      expect(
+        await preflight(
+          register,
+          ["https://app.example.com"],
+          "http://localhost:5173"
+        )
+      ).toBe("http://localhost:5173");
+      expect(
+        await preflight(
+          register,
+          ["https://app.example.com"],
+          "http://127.0.0.1:5173"
+        )
+      ).toBeNull();
     }
   );
 });
