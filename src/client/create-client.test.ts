@@ -361,6 +361,72 @@ describe("createClient route registration", () => {
   });
 });
 
+describe("createClient CORS with wildcard trustedOrigins", () => {
+  const preflight = async (
+    register: "registerRoutes" | "registerRoutesLazy",
+    trustedOrigins: string[],
+    origin: string
+  ) => {
+    const client = createClient(component);
+    const http = httpRouter();
+    const createAuth = vi.fn(() => ({
+      handler: async () => new Response("ok"),
+      options: { trustedOrigins },
+      $context: betterAuthContext(trustedOrigins),
+    }));
+    client[register](http, createAuth, { cors: true });
+    const response = await getRouteHandler(
+      http,
+      "/api/auth/sign-in/email",
+      "OPTIONS"
+    )!._handler(
+      {},
+      new Request("https://deployment.convex.site/api/auth/sign-in/email", {
+        method: "OPTIONS",
+        headers: { origin, "access-control-request-method": "POST" },
+      })
+    );
+    return response.headers.get("access-control-allow-origin");
+  };
+
+  const betterAuthContext = async (trustedOrigins: string[]) => {
+    const { betterAuth } = await import("better-auth/minimal");
+    return betterAuth({
+      baseURL: "https://deployment.convex.site",
+      secret: "test-secret-that-is-long-enough-for-better-auth",
+      trustedOrigins,
+    }).$context;
+  };
+
+  it.each(["registerRoutes", "registerRoutesLazy"] as const)(
+    "%s allows origins matching a Better Auth wildcard",
+    async (register) => {
+      for (const [pattern, origin] of [
+        ["http://127.0.0.1:*", "http://127.0.0.1:5173"],
+        ["http://localhost:*", "http://localhost:3000"],
+        ["https://*.example.com", "https://app.example.com"],
+        ["*.example.com", "https://app.example.com"],
+      ]) {
+        expect(await preflight(register, [pattern], origin)).toBe(origin);
+      }
+    }
+  );
+
+  it.each(["registerRoutes", "registerRoutesLazy"] as const)(
+    "%s rejects origins outside a Better Auth wildcard",
+    async (register) => {
+      for (const [pattern, origin] of [
+        ["http://127.0.0.1:*", "http://127.0.0.2:5173"],
+        ["http://localhost:*", "https://localhost:3000"],
+        ["https://*.example.com", "https://example.com.evil.test"],
+        ["http://localhost:*", "http://localhost.evil.test:3000"],
+      ]) {
+        expect(await preflight(register, [pattern], origin)).toBeNull();
+      }
+    }
+  );
+});
+
 describe("createClient verbose logging", () => {
   it("doesn't turn on the adapter's debugLogs", () => {
     // Adapter debug logs print full database rows, including session tokens
