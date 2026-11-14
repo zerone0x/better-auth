@@ -322,6 +322,124 @@ describe("createClient route registration", () => {
     });
   });
 
+  describe("CORS with wildcard trustedOrigins", () => {
+    const preflight = async (
+      http: ReturnType<typeof httpRouter>,
+      origin: string
+    ) => {
+      const optionsHandler = getRouteHandler(
+        http,
+        "/api/auth/sign-in/email",
+        "OPTIONS"
+      );
+      expect(optionsHandler).toBeTruthy();
+      const response = await optionsHandler!._handler(
+        {},
+        new Request("https://deployment.convex.site/api/auth/sign-in/email", {
+          method: "OPTIONS",
+          headers: {
+            origin,
+            "access-control-request-method": "POST",
+          },
+        })
+      );
+      return response.headers.get("access-control-allow-origin");
+    };
+
+    const eagerRoutes = (
+      trustedOrigins: TrustedOriginsOption,
+      cors: Parameters<ReturnType<typeof createClient>["registerRoutes"]>[2] = {
+        cors: true,
+      }
+    ) => {
+      const http = httpRouter();
+      createClient(component).registerRoutes(
+        http,
+        () =>
+          ({
+            handler: async () => new Response("ok"),
+            options: { trustedOrigins },
+            $context: Promise.resolve({ options: { trustedOrigins } }),
+          }) as any,
+        cors
+      );
+      return http;
+    };
+
+    it.each([
+      ["http://127.0.0.1:*", "http://127.0.0.1:5173"],
+      ["http://localhost:*", "http://localhost:3000"],
+      ["https://*.example.com", "https://app.example.com"],
+      ["https://*.example.com", "https://a.b.example.com"],
+      ["*.example.com", "https://app.example.com"],
+      ["*.example.com", "http://app.example.com"],
+      ["http://192.168.*.*:*", "http://192.168.1.20:8080"],
+      ["https://app-?.example.com", "https://app-1.example.com"],
+      ["*", "https://anything.example.org"],
+    ])("allows %s for %s", async (pattern, origin) => {
+      expect(await preflight(eagerRoutes([pattern]), origin)).toBe(origin);
+    });
+
+    it.each([
+      ["http://127.0.0.1:*", "http://127.0.0.2:5173"],
+      ["http://127.0.0.1:*", "https://127.0.0.1:5173"],
+      ["http://localhost:*", "http://localhost"],
+      ["https://*.example.com", "http://app.example.com"],
+      ["https://*.example.com", "https://example.com"],
+      ["https://*.example.com", "https://app.example.com.evil.test"],
+      ["https://*.example.com", "https://evilexample.com"],
+      ["*.example.com", "https://example.com"],
+      ["http://192.168.*", "http://192.168.attacker.com"],
+      ["*", "null"],
+      ["https://*.example.com", "https://app.example.com/path"],
+    ])("rejects %s for %s", async (pattern, origin) => {
+      expect(await preflight(eagerRoutes([pattern]), origin)).toBeNull();
+    });
+
+    it("keeps exact trusted origins and cors.allowedOrigins", async () => {
+      const http = eagerRoutes(
+        ["https://app.example.com", "http://localhost:*"],
+        { cors: { allowedOrigins: ["https://extra.example.org"] } }
+      );
+      expect(await preflight(http, "https://app.example.com")).toBe(
+        "https://app.example.com"
+      );
+      expect(await preflight(http, "https://extra.example.org")).toBe(
+        "https://extra.example.org"
+      );
+      expect(await preflight(http, "http://localhost:5173")).toBe(
+        "http://localhost:5173"
+      );
+      expect(await preflight(http, "https://other.example.com")).toBeNull();
+    });
+
+    it("matches wildcards returned by a trustedOrigins function", async () => {
+      const trustedOrigins = vi.fn(async () => ["http://127.0.0.1:*"]);
+      const http = eagerRoutes(trustedOrigins);
+      expect(await preflight(http, "http://127.0.0.1:4321")).toBe(
+        "http://127.0.0.1:4321"
+      );
+      expect(trustedOrigins).toHaveBeenCalled();
+    });
+
+    it("registerRoutesLazy matches wildcards without loading Better Auth", async () => {
+      const http = httpRouter();
+      const createAuth = vi.fn();
+      createClient(component).registerRoutesLazy(http, createAuth as any, {
+        cors: true,
+        trustedOrigins: ["http://localhost:*", "https://*.example.com"],
+      });
+      expect(await preflight(http, "http://localhost:3000")).toBe(
+        "http://localhost:3000"
+      );
+      expect(await preflight(http, "https://app.example.com")).toBe(
+        "https://app.example.com"
+      );
+      expect(await preflight(http, "https://app.example.net")).toBeNull();
+      expect(createAuth).not.toHaveBeenCalled();
+    });
+  });
+
   it("registerRoutesLazy resolves trustedOrigins lazily when needed", async () => {
     const client = createClient(component);
     const http = httpRouter();

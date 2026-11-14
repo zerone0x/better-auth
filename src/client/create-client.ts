@@ -137,6 +137,88 @@ const parseHttpOrigin = (value: string) => {
   }
 };
 
+// Turns a glob from trustedOrigins into an anchored RegExp the way Better
+// Auth's wildcardMatch does without a separator: `*` matches any run of
+// characters, `?` one character, and `\\` escapes the next one.
+const originGlobToRegExp = (pattern: string) => {
+  let source = "";
+  for (let i = 0; i < pattern.length; i++) {
+    const char = pattern[i];
+    if (char === "\\" && i < pattern.length - 1) {
+      source += escapeRegExp(pattern[++i]);
+    } else if (char === "*") {
+      source += ".*?";
+    } else if (char === "?") {
+      source += ".";
+    } else {
+      source += escapeRegExp(char);
+    }
+  }
+  return new RegExp(`^${source}$`);
+};
+
+const escapeRegExp = (value: string) =>
+  value.replace(/[-^$+.()|[\]{}*?\\/]/g, "\\$&");
+
+// A wildcard host made only of digits, dots and wildcards (`192.168.*.*`)
+// names an address range, so like Better Auth it admits only an IPv4
+// address, never a name such as `192.168.attacker.com`.
+const allowsIPv4Host = (patternAuthority: string, authority: string) => {
+  const patternHost = patternAuthority.split(":")[0];
+  if (!/^(?=.*\d)[\d*?.]+$/.test(patternHost)) {
+    return true;
+  }
+  return /^\d{1,3}(?:\.\d{1,3}){3}$/.test(authority.split(":")[0]);
+};
+
+// Whether a browser origin (`scheme://host[:port]`) matches a wildcard
+// entry in trustedOrigins, with Better Auth's semantics for http(s):
+// `https://*.example.com` and `http://localhost:*` match the full origin,
+// and a pattern without a scheme (`*.example.com`) matches the host alone.
+const matchesWildcardOrigin = (origin: string, pattern: string) => {
+  const host = new URL(origin).host;
+  const schemeEnd = pattern.indexOf("://");
+  if (schemeEnd === -1) {
+    return (
+      originGlobToRegExp(pattern).test(host) && allowsIPv4Host(pattern, host)
+    );
+  }
+  return (
+    originGlobToRegExp(pattern).test(origin) &&
+    allowsIPv4Host(pattern.slice(schemeEnd + 3), host)
+  );
+};
+
+// The allow-list handed to corsRouter for one request. corsRouter only
+// understands exact origins, `*` and `*.domain` (https only), so exact
+// entries pass through unchanged and wildcard entries are matched here:
+// when one matches the request's origin, that origin is allowed as-is.
+const corsAllowedOrigins = (
+  request: Request,
+  rawOrigins: (string | null | undefined)[]
+) => {
+  const trustedOrigins = rawOrigins.filter(
+    (origin): origin is string => typeof origin === "string"
+  );
+  const allowed = trustedOrigins.filter(
+    (origin) => !origin.includes("*") && !origin.includes("?")
+  );
+  const requestOrigin = request.headers.get("origin");
+  if (
+    requestOrigin &&
+    parseHttpOrigin(requestOrigin) === requestOrigin &&
+    !allowed.includes(requestOrigin) &&
+    trustedOrigins.some(
+      (pattern) =>
+        (pattern.includes("*") || pattern.includes("?")) &&
+        matchesWildcardOrigin(requestOrigin, pattern)
+    )
+  ) {
+    allowed.push(requestOrigin);
+  }
+  return allowed;
+};
+
 // The origin a `proto` + `host` header pair claims, or null when it isn't a
 // bare http(s) origin (no userinfo, path, query or fragment smuggled in).
 const forwardedOrigin = (proto: string | null, host: string | null) => {
@@ -592,17 +674,9 @@ export const createClient = <
           const rawOrigins = Array.isArray(resolvedTrustedOrigins)
             ? resolvedTrustedOrigins
             : await resolvedTrustedOrigins(request);
-          const trustedOrigins = rawOrigins.filter(
-            (origin): origin is string => typeof origin === "string"
+          return corsAllowedOrigins(request, rawOrigins).concat(
+            corsOpts.allowedOrigins ?? []
           );
-          return trustedOrigins
-            .map((origin) =>
-              // Strip trailing wildcards, unsupported for allowedOrigins
-              origin.endsWith("*") && origin.length > 1
-                ? origin.slice(0, -1)
-                : origin
-            )
-            .concat(corsOpts.allowedOrigins ?? []);
         },
         allowCredentials: true,
         allowedHeaders: [
@@ -710,17 +784,9 @@ export const createClient = <
           const rawOrigins = Array.isArray(resolvedTrustedOrigins)
             ? resolvedTrustedOrigins
             : await resolvedTrustedOrigins(request);
-          const trustedOrigins = rawOrigins.filter(
-            (origin): origin is string => typeof origin === "string"
+          return corsAllowedOrigins(request, rawOrigins).concat(
+            corsOpts.allowedOrigins ?? []
           );
-          return trustedOrigins
-            .map((origin) =>
-              // Strip trailing wildcards, unsupported for allowedOrigins
-              origin.endsWith("*") && origin.length > 1
-                ? origin.slice(0, -1)
-                : origin
-            )
-            .concat(corsOpts.allowedOrigins ?? []);
         },
         allowCredentials: true,
         allowedHeaders: [
